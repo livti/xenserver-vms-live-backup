@@ -1,6 +1,0 @@
-#summary Citrix XenServer is a complete, managed server virtualization platform built on the powerful Xen hypervisor.
-#labels Phase-Requirements
-
-= For more info =
-
-[http://www.citrix.com/English/ps2/products/product.asp?contentID=683148 Citrix XenServer Homepage]
