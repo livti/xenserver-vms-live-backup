@@ -84,15 +84,7 @@ This class represents the EVT_RESULT_ID event which carry arbitrary result data
 class VM2Export(threading.Thread):
     """ 
 This class represents a copy of the virtual machine to be exported
-    """    
-
-    """ XenServer task list to be associated with the export process grouped by virtual machine's name """    
-    export_tasks = {}
-    """ Synchronization event to notify export task creation """
-    event = threading.Event()
-    """ Lock to guard task list """
-    lock = threading.Lock()
-    
+    """ 
     def __init__(self, xen):
         """ 
     VM2Export Constructor 
@@ -103,6 +95,7 @@ This class represents a copy of the virtual machine to be exported
         self.vm = None
         self.root_vdi = None
         self.root_vbd = None
+        self.root_vbd_copy = None
         self.urldict = None
         
     def __del__(self): 
@@ -116,13 +109,18 @@ This class represents a copy of the virtual machine to be exported
             vm_record = self.xen.session.xenapi.VM.get_record(self.vm)
             self.xen.log('Destroying vm: %s' % vm_record['name_label'])
             for vbd in vm_record['VBDs']:
+                # detach system VDI
                 vbd_record = self.xen.session.xenapi.VBD.get_record(vbd)
+                # destroy VM's VDI
                 if vbd_record['type'].lower() != 'disk':
                     continue
                 vdi = vbd_record['VDI']
                 sr = self.xen.session.xenapi.VDI.get_SR(vdi)
                 self.xen.session.xenapi.VDI.destroy(vdi)
                 self.xen.session.xenapi.SR.scan(sr)
+            # destroy system VDI snapshot
+            self.xen.session.xenapi.VDI.destroy(self.root_vdi)
+            # destroy exported VM
             self.xen.session.xenapi.VM.destroy(self.vm)
         except Exception, e:
             self.xen.log('Error destroying vm %s: %s' % (vm_record['name_label'], str(e)), 'ERR')
@@ -135,11 +133,11 @@ This class represents a copy of the virtual machine to be exported
     1) create new virtual machine based on existing virtual machine's data
     2) for each original virtual machine's VBD, find out if its a disk (not dvd or similar) then get VDI/VBD info:
         2.1) take a snapshot of the system VDI and recreate other VDIs on the SR specified at startup (nfs_sr)
-        2.2) recreate VBD and attach the VDIs previously recreated to the newly created virtual machine
+        2.2) recreate VBD and attach the VDIs previously recreated to the newly created virtual machine (except root VDI)
     3) for each original virtual machine's VIF get info:
         3.1) recreate VIF and attach it to the newly created virtual machine
     4) set data necessary for the exporting process:
-        export url:     https://<host>/export?ref=<vmref>&session_id=<sessionref>&task_id=<taskref>
+        export url:     https://<host>/export_metadata?ref=<vmref>&session_id=<sessionref>&task_id=<taskref>
         export path:    /<path>/<vmname>.xva
         """
         # 1)
@@ -199,6 +197,7 @@ This class represents a copy of the virtual machine to be exported
                 except Exception, e:
                     self.xen.log('Error taking snapshot of disk %s: %s' % (vdi_record['name_label'], str(e)), 'ERR')
                     raise
+		# save root VDI data for later pourpose...
                 self.root_vdi = vdi_copy
                 self.root_vbd = vbd_record
             else:
@@ -266,44 +265,74 @@ This class represents a copy of the virtual machine to be exported
             uuid = vm_record['uuid'],
             name = vm_record['name_label'] + '_Exported',
             ex1 = "https://",
-            ex2 = "/export?uuid=",
+            ex2 = "/export_metadata?uuid=",
             ex3 = path + "/",
             ex4 = ".xva",
             ex5 = "&task_id=",
             ex6 = "&session_id=" + str(self.xen.session),
-            ex7 = "/export?ref=" + str(self.vm))
+            ex7 = "/export_metadata?ref=" + str(self.vm))
             
     def export(self, session, name_label):
         """ 
     Export backup virtual machine:
      
-    1) set path for .xva export file
-    2) build authorization header
-    3) build http url request (in mutex)
-    4) add auth header to http request
-    5) send out http request
-    6) export virtual machine to local path
+    1) reattach system disk
+    2) set path for .xva export file
+    3) build authorization header
+    4) build http url request
+    5) add auth header to http request
+    6) send out http request
+    7) export virtual machine metadata to local path
         """
         # 1)
+        try:
+            vdi_copy = None
+            vdi_set = self.xen.session.xenapi.SR.get_VDIs(self.xen.nfs_sr)
+            for vdi in vdi_set:
+                vdi_name = self.xen.session.xenapi.VDI.get_name_label(vdi)
+                if vdi_name == self.xen.session.xenapi.VDI.get_name_label(self.root_vdi):
+                    vdi_copy = vdi
+                    break
+            if vdi_copy is not None:
+                data = {'VM': self.vm,
+                    'VDI': vdi_copy,
+                    'userdevice': self.root_vbd['userdevice'],
+                    'mode': self.root_vbd['mode'],
+                    'type': self.root_vbd['type'],
+                    'bootable': self.root_vbd['bootable'],
+                    'unpluggable': self.root_vbd['unpluggable'],
+                    'empty': self.root_vbd['empty'],
+                    'other_config': {},
+                    'qos_algorithm_type': self.root_vbd['qos_algorithm_type'],
+                    'qos_algorithm_params': self.root_vbd['qos_algorithm_params'],
+                    }
+                self.xen.log('Attaching disk: %s' % vdi_name)
+                self.root_vbd_copy = self.xen.session.xenapi.VBD.create(data)
+            else:
+                raise Exception, "VDI not found"
+        except Exception, e:
+            self.xen.log('Error attaching disk %s: %s' % (vdi_name,str(e)), 'ERR')
+            raise
+        # 2)
         filepath = self.urldict["ex3"] + self.urldict["name"] + self.urldict["ex4"]
         try:
-            # 2)
-            auth = base64.encodestring("%s:%s" % (self.urldict["user"], self.urldict["login"])).strip()
             # 3)
+            auth = base64.encodestring("%s:%s" % (self.urldict["user"], self.urldict["login"])).strip()
+            # 4)
             request = urllib2.Request(self.urldict["ex1"] + \
                 self.urldict["srv"] + \
                 self.urldict["ex7"])
-##                + \ self.urldict["ex5"] + str(VM2Export.export_tasks[name_label]))
-            # 4)
-            request.add_header("Authorization", "Basic %s" % auth)
             # 5)
-            export = urllib2.urlopen(request)
+            request.add_header("Authorization", "Basic %s" % auth)
             # 6)
+            export = urllib2.urlopen(request)
+            # 7)
             outputfile = open(filepath, "wb")
             for line in export:
                 outputfile.write(line)
             outputfile.close()
         except Exception, e:
+            self.xen.log('Error exporting %s: %s' % (self.urldict["name"], str(e)), 'ERR')
             if (os.path.exists(filepath)):
                 os.unlink(filepath)
             raise
@@ -432,7 +461,7 @@ This class represents the XemServer backup library
             self.log('Exporting VM')
             try:
                 try:
-                # copy VM copy root disk
+                # copy VM root disk to destination SR
                     copy_task = self.session.xenapi.Async.VDI.copy(self.vm_to_export.root_vdi, self.nfs_sr)
                 # add copy_task to task list and get its uuid and name
                     self.vm_to_export.tasks[vm_to_export_name].append(copy_task)
@@ -442,8 +471,6 @@ This class represents the XemServer backup library
                     print 'Error creating vm copy task: %s' % str(e), 'ERR'
                     self.log('Error creating vm copy task: %s' % str(e), 'ERR')
                     raise
-                print 'add copy_task to task list: %s, %s' % (self.vm_to_export.tasks[vm_to_export_name][0], copy_uuid)
-                self.log('add copy_task to task list: %s, %s' % (self.vm_to_export.tasks[vm_to_export_name][0], copy_uuid))
                 if self.parent is not None:
                     print 'notify parent'
                     # notify GUI parent if exists
@@ -452,9 +479,12 @@ This class represents the XemServer backup library
                                 }
                     wx.PostEvent(self.parent, ResultEvent(event_data))
                 while not exit:
+		    # poll copy task every 10 seconds...
                     time.sleep(10)
                     try:
+			#...monitor its status...
                         copy_status = self.session.xenapi.task.get_status(copy_task)
+			# ...and its progress
                         copy_progress = self.session.xenapi.task.get_progress(copy_task)
                         # if copy_task has been cencelled
                         if copy_task not in self.vm_to_export.tasks[vm_to_export_name]:
@@ -466,7 +496,7 @@ This class represents the XemServer backup library
                         if copy_status != 'pending':
                             print 'copy_task finished %s' % copy_status
                             self.log('copy_task finished %s' % copy_status)
-                            # exit from cicle
+                            # exit from polling cicle
                             exit = True
                         #
                         # notify GUI parent if exists
@@ -481,6 +511,7 @@ This class represents the XemServer backup library
                             wx.PostEvent(self.parent, ResultEvent(event_data))
                     except XenAPI.Failure, e:
                         self.log('Error in monitoring task: %s' % str(e), 'ERR')
+                        raise
             finally:
                 # remove copy_task from task list
                 if copy_task in self.vm_to_export.tasks[vm_to_export_name]:
@@ -490,33 +521,17 @@ This class represents the XemServer backup library
                 copy_task = None
                 # export VM copy metadata
                 if copy_status == TASK_STATUS['success']:
-                    vdi_set = self.session.xenapi.SR.get_VDIs(self.nfs_sr)
-                    for vdi in vdi_set:
-                        vdi_name = self.session.xenapi.VDI.get_name_label(vdi)
-                        if vdi_name == self.session.xenapi.VDI.get_name_label(self.vm_to_export.root_vdi):
-                            print 'trovato!'
-                            vdi_copy = vdi
-                            break
-                    data = {'VM': self.vm_to_export.vm,
-                        'VDI': vdi_copy,
-                        'userdevice': self.vm_to_export.root_vbd['userdevice'],
-                        'mode': self.vm_to_export.root_vbd['mode'],
-                        'type': self.vm_to_export.root_vbd['type'],
-                        'bootable': self.vm_to_export.root_vbd['bootable'],
-                        'unpluggable': self.vm_to_export.root_vbd['unpluggable'],
-                        'empty': self.vm_to_export.root_vbd['empty'],
-                        'other_config': {},
-                        'qos_algorithm_type': self.vm_to_export.root_vbd['qos_algorithm_type'],
-                        'qos_algorithm_params': self.vm_to_export.root_vbd['qos_algorithm_params'],
-                        }       
-                    print 'Attaching disk: RESTORE_%s' % vdi_name
-                    self.log('Attaching disk: RESTORE_%s' % vdi_name)
-                    self.session.xenapi.VBD.create(data)
-                    self.vm_to_export.start()
-                    # wait for export thread to finish
-                    self.vm_to_export.join()
-                # destroy VM2Export object
-                self.vm_to_export = None
+                    try:
+                        self.vm_to_export.start()
+                        # wait for export thread to finish
+                        self.vm_to_export.join()
+                        # detach system VDI
+                        self.session.xenapi.VBD.destroy(self.vm_to_export.root_vbd_copy)
+                        # destroy VM2Export object
+                        self.vm_to_export = None
+                    except Exception, e:
+                        copy_status = TASK_STATUS['failure']
+                        raise
                 # notify GUI parent if exists 
                 if self.parent is not None:
                     event_data = {'name': BACKUP_EVENTS['end_task'],
@@ -718,8 +733,6 @@ This class represents the XemServer backup library
     Load configuration parameters from configuration file
         """        
         config_file = open(path, 'r')
-##        self.config['vm'] = []
-##        self.config['tag'] = []
         for line in config_file:
             if (not line.startswith('#') and len(line.strip()) > 0):
                 (key,value) = line.strip().split('=')

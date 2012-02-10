@@ -148,7 +148,6 @@ This class represents the main GUI frame
         """        
         # 1)
         if evt.data['name'] == XenBackup.BACKUP_EVENTS['start_backup']:
-            print 'start_backup'
             # 1.1)
             self.vmLeft = len(self.xen.config['vm'])
             self.vmCount = self.vmLeft
@@ -162,7 +161,6 @@ This class represents the main GUI frame
             self.statusBeforeBackup = xrc.XRCCTRL(self, 'mainStatus').GetStatusText(0)
         # 2)
         elif evt.data['name'] == XenBackup.BACKUP_EVENTS['end_backup']:
-            print 'end_backup'
             # 2.2)
             xrc.XRCCTRL(self, 'backupButton').SetLabel(backupButtonLabel['backup'])
             xrc.XRCCTRL(self, 'backupButton').SetToolTip(wx.ToolTip(backupButtonTooltip['backup']))
@@ -173,12 +171,10 @@ This class represents the main GUI frame
             xrc.XRCCTRL(self, 'mainStatus').SetStatusText(self.statusBeforeBackup, 0)
         # 3)
         elif evt.data['name'] == XenBackup.BACKUP_EVENTS['start_task']:
-            print 'start_task'
             # 3.1)
             self.exportTaskVM = evt.data['task_vm']
         # 4)
         elif evt.data['name'] == XenBackup.BACKUP_EVENTS['end_task']:
-            print 'end_task'
             # 4.1)
             self.vmLeft -= 1
             # 4.2)
@@ -195,7 +191,6 @@ This class represents the main GUI frame
                                     current = str(self.vmCount - (self.vmLeft - 1)), \
                                     total = str(self.vmCount))
             xrc.XRCCTRL(self, 'mainStatus').SetStatusText(status, 0)
-            print 'progress_task %s' % status
 
     def OnButton_hostButton(self, evt):
         """
